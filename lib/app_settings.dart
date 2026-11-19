@@ -88,9 +88,10 @@ class AppSettingsData {
   const AppSettingsData({
     this.paletteIndex = 0,
     this.logoKey = 'savings',
-    this.username = 'admin',
-    this.password = 'admin123',
+    this.username = '',
+    this.password = '',
     this.onboardingCompleted = false,
+    this.registrationCompleted = false,
   });
 
   final int paletteIndex;
@@ -101,12 +102,26 @@ class AppSettingsData {
   /// La introducción animada se muestra solo en el primer ingreso.
   final bool onboardingCompleted;
 
+  /// Los usuarios nuevos crean sus credenciales después del onboarding.
+  final bool registrationCompleted;
+
+  /// No hay credenciales prefijadas: mientras estén vacías, la app debe
+  /// llevar al registro antes de mostrar el login.
+  bool get hasCredentials => username.isNotEmpty && password.isNotEmpty;
+
+  /// Las credenciales históricas `admin` / `admin123` no cuentan como un
+  /// registro real. Solo se aceptan si el usuario las eligió explícitamente
+  /// después de este cambio (flag `registration_completed` en `true`).
+  bool get usesLegacyDefaultCredentials =>
+      username.toLowerCase() == 'admin' && password == 'admin123';
+
   AppSettingsData copyWith({
     int? paletteIndex,
     String? logoKey,
     String? username,
     String? password,
     bool? onboardingCompleted,
+    bool? registrationCompleted,
   }) {
     return AppSettingsData(
       paletteIndex: paletteIndex ?? this.paletteIndex,
@@ -114,6 +129,8 @@ class AppSettingsData {
       username: username ?? this.username,
       password: password ?? this.password,
       onboardingCompleted: onboardingCompleted ?? this.onboardingCompleted,
+      registrationCompleted:
+          registrationCompleted ?? this.registrationCompleted,
     );
   }
 }
@@ -137,23 +154,59 @@ class AppSettings {
   Future<void> load() async {
     final preferences = await SharedPreferences.getInstance();
     _preferences = preferences;
-    values.value = AppSettingsData(
+    // Clave nueva, con respaldo de la vieja para no repetir la introducción
+    // a quien ya la vio en una versión anterior.
+    final onboardingCompleted =
+        preferences.getBool(_Keys.onboardingCompleted) ??
+        preferences.getBool(_Keys.legacyIntroCompleted) ??
+        false;
+    final username = preferences.getString(_Keys.username) ?? '';
+    final password = preferences.getString(_Keys.password) ?? '';
+    final data = AppSettingsData(
       paletteIndex: preferences.getInt(_Keys.palette) ?? 0,
       logoKey: preferences.getString(_Keys.logo) ?? 'savings',
-      username: preferences.getString(_Keys.username) ?? 'admin',
-      password: preferences.getString(_Keys.password) ?? 'admin123',
-      // Clave nueva, con respaldo de la vieja para no repetir la introducción
-      // a quien ya la vio en una versión anterior.
-      onboardingCompleted:
-          preferences.getBool(_Keys.onboardingCompleted) ??
-          preferences.getBool(_Keys.legacyIntroCompleted) ??
-          false,
+      username: username,
+      password: password,
+      onboardingCompleted: onboardingCompleted,
+      registrationCompleted:
+          preferences.getBool(_Keys.registrationCompleted) ?? false,
+    );
+    // Un arranque fresco no tiene credenciales. Tampoco se considera
+    // registrado a un perfil anterior que solo guardó los valores de ejemplo
+    // `admin` / `admin123`: deben elegir los suyos.
+    final needsRegistration =
+        !data.hasCredentials ||
+        (data.usesLegacyDefaultCredentials && !data.registrationCompleted);
+    values.value = data.copyWith(
+      registrationCompleted: needsRegistration
+          ? false
+          : data.registrationCompleted,
     );
   }
 
   /// Marca la introducción como vista (o saltada) y la persiste.
   Future<void> markOnboardingCompleted() =>
       update(current.copyWith(onboardingCompleted: true));
+
+  /// Guarda las credenciales creadas por un usuario nuevo.
+  Future<void> completeRegistration({
+    required String username,
+    required String password,
+  }) => update(
+    current.copyWith(
+      username: username,
+      password: password,
+      registrationCompleted: true,
+    ),
+  );
+
+  /// Restablece solo las credenciales cuando el usuario las olvidó.
+  ///
+  /// Conserva la base de datos y el onboarding: se vuelve al registro, no a
+  /// la introducción ni a una pantalla de login sin credenciales válidas.
+  Future<void> resetCredentials() => update(
+    current.copyWith(username: '', password: '', registrationCompleted: false),
+  );
 
   /// Permite volver a ver la introducción desde Configuración.
   Future<void> resetOnboarding() =>
@@ -171,6 +224,10 @@ class AppSettings {
       _Keys.onboardingCompleted,
       data.onboardingCompleted,
     );
+    await preferences.setBool(
+      _Keys.registrationCompleted,
+      data.registrationCompleted,
+    );
   }
 }
 
@@ -180,5 +237,6 @@ abstract final class _Keys {
   static const username = 'settings_username';
   static const password = 'settings_password';
   static const onboardingCompleted = 'onboarding_completed';
+  static const registrationCompleted = 'registration_completed';
   static const legacyIntroCompleted = 'settings_intro_completed';
 }

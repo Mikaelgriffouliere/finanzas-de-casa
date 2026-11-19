@@ -7,6 +7,7 @@ import 'package:finanzas_personales/app_settings.dart';
 import 'package:finanzas_personales/finance_database.dart';
 import 'package:finanzas_personales/main.dart';
 import 'package:finanzas_personales/onboarding/onboarding.dart';
+import 'package:finanzas_personales/register_screen.dart';
 
 /// SQLite por FFI usa un isolate real, por eso hay que ceder el control al
 /// event loop (runAsync) para que la app termine de cargar antes de verificar.
@@ -17,32 +18,72 @@ Future<void> _settle(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
-Future<void> _startApp(WidgetTester tester) async {
+const _testUser = 'usuario';
+const _testPassword = 'clave123';
+
+/// Deja las preferencias como en una instalación nueva: sin credenciales.
+Future<void> _resetPreferences() async {
+  SharedPreferences.setMockInitialValues({});
+  await AppSettings.instance.load();
+}
+
+/// Perfil ya registrado, para los tests que empiezan desde el panel.
+Future<void> _seedRegisteredUser({
+  String user = _testUser,
+  String password = _testPassword,
+}) async {
+  await _resetPreferences();
+  await AppSettings.instance.completeRegistration(
+    username: user,
+    password: password,
+  );
+  await AppSettings.instance.markOnboardingCompleted();
+}
+
+Future<void> _pumpApp(WidgetTester tester) async {
   await tester.runAsync(() async {
     await FinanceDatabase.instance.database;
   });
   await tester.pumpWidget(const FinanceApp());
   await _settle(tester);
+}
+
+Future<void> _startApp(WidgetTester tester) async {
+  await _pumpApp(tester);
   await _login(tester);
 }
 
 Future<void> _login(
   WidgetTester tester, {
-  String user = 'admin',
-  String password = 'admin123',
-  bool skipIntro = true,
+  String user = _testUser,
+  String password = _testPassword,
 }) async {
-  await tester.enterText(find.byType(TextFormField).at(0), user);
-  await tester.enterText(find.byType(TextFormField).at(1), password);
+  final fields = find.byType(TextFormField);
+  await tester.enterText(fields.at(0), user);
+  await tester.enterText(fields.at(1), password);
   await tester.tap(find.widgetWithText(FilledButton, 'Iniciar sesión'));
   await _settle(tester);
+}
 
-  // La intro aparece solo en el primer ingreso. El resto de los tests arranca
-  // desde el panel principal, así que la omitimos de forma centralizada.
-  if (skipIntro && find.byType(OnboardingScreen).evaluate().isNotEmpty) {
-    await tester.tap(find.text('Saltar'));
-    await _settle(tester);
-  }
+Future<void> _completeOnboarding(WidgetTester tester) async {
+  expect(find.byType(OnboardingScreen), findsOneWidget);
+  await tester.tap(find.text('Saltar'));
+  await _settle(tester);
+  expect(find.byType(OnboardingScreen), findsNothing);
+}
+
+Future<void> _completeRegistration(
+  WidgetTester tester, {
+  String user = 'nuevo',
+  String password = 'clave123',
+}) async {
+  expect(find.byType(RegisterScreen), findsOneWidget);
+  final fields = find.byType(TextFormField);
+  await tester.enterText(fields.at(0), user);
+  await tester.enterText(fields.at(1), password);
+  await tester.enterText(fields.at(2), password);
+  await tester.tap(find.widgetWithText(FilledButton, 'Crear cuenta'));
+  await _settle(tester);
 }
 
 Future<void> _deleteEntriesStartingWith(String prefix) async {
@@ -60,6 +101,12 @@ void main() {
     await initializeDateFormatting('es_AR');
     SharedPreferences.setMockInitialValues({});
     await AppSettings.instance.load();
+  });
+
+  // Cada test arranca con un perfil registrado, salvo los que comprueban
+  // explícitamente el estado de una instalación nueva.
+  setUp(() async {
+    await _seedRegisteredUser();
   });
 
   testWidgets('inicia y cierra sesión', (tester) async {
@@ -86,11 +133,75 @@ void main() {
 
     await tester.tap(find.text('Familia'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Cerrar sesión'));
+    await tester.tap(find.byTooltip('Cerrar sesión'));
     await tester.pumpAndSettle();
 
     expect(find.text('Iniciar sesión'), findsOneWidget);
     expect(find.text('Balance total'), findsNothing);
+  });
+
+  testWidgets('recupera credenciales olvidadas sin borrar los datos', (
+    tester,
+  ) async {
+    final database = FinanceDatabase.instance;
+    final categoryName =
+        'Recuperación ${DateTime.now().microsecondsSinceEpoch}';
+    final category = await database.insertCategory(
+      FinanceCategory(
+        name: categoryName,
+        isIncome: false,
+        icon: 'otros',
+        color: 0xFF123456,
+      ),
+    );
+
+    await _pumpApp(tester);
+    expect(find.byType(LoginScreen), findsOneWidget);
+
+    await tester.tap(find.text('¿Olvidaste tus credenciales?'));
+    await _settle(tester);
+    expect(find.text('¿Restablecer credenciales?'), findsOneWidget);
+    expect(
+      find.textContaining('Tus movimientos, categorías e integrantes'),
+      findsOneWidget,
+    );
+
+    // Cancelar no modifica nada.
+    await tester.tap(find.text('Cancelar'));
+    await _settle(tester);
+    expect(AppSettings.instance.current.hasCredentials, isTrue);
+
+    await tester.tap(find.text('¿Olvidaste tus credenciales?'));
+    await _settle(tester);
+    await tester.tap(find.text('Restablecer'));
+    await _settle(tester);
+
+    expect(find.byType(RegisterScreen), findsOneWidget);
+    expect(find.byType(OnboardingScreen), findsNothing);
+    expect(find.byType(LoginScreen), findsNothing);
+
+    final preferences = await SharedPreferences.getInstance();
+    expect(preferences.getString('settings_username'), isEmpty);
+    expect(preferences.getString('settings_password'), isEmpty);
+    expect(preferences.getBool('registration_completed'), isFalse);
+    expect(preferences.getBool('onboarding_completed'), isTrue);
+
+    // La base de datos no se tocó.
+    final categories = await database.getCategories();
+    expect(categories.any((item) => item.name == categoryName), isTrue);
+    await database.deleteCategory(category);
+
+    await _completeRegistration(
+      tester,
+      user: 'recuperado',
+      password: 'nueva123',
+    );
+    expect(find.byType(FinanceHome), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Cerrar sesión'));
+    await _settle(tester);
+    await _login(tester, user: 'recuperado', password: 'nueva123');
+    expect(find.byType(FinanceHome), findsOneWidget);
   });
 
   testWidgets('muestra el panel financiero y la navegación', (tester) async {
@@ -593,15 +704,74 @@ void main() {
   });
 
   testWidgets(
+    'sin credenciales por defecto: instalación nueva va a onboarding y registro',
+    (tester) async {
+      await _resetPreferences();
+      final settings = AppSettings.instance.current;
+      expect(settings.username, isEmpty);
+      expect(settings.password, isEmpty);
+      expect(settings.hasCredentials, isFalse);
+      expect(settings.registrationCompleted, isFalse);
+
+      final preferences = await SharedPreferences.getInstance();
+      expect(preferences.getString('settings_username'), isNull);
+      expect(preferences.getString('settings_password'), isNull);
+
+      await _pumpApp(tester);
+      expect(find.byType(OnboardingScreen), findsOneWidget);
+      expect(find.byType(LoginScreen), findsNothing);
+      expect(find.text('Iniciar sesión'), findsNothing);
+
+      await tester.tap(find.text('Saltar'));
+      await _settle(tester);
+      expect(find.byType(RegisterScreen), findsOneWidget);
+      expect(find.byType(LoginScreen), findsNothing);
+      expect(find.text('Creá tu cuenta'), findsOneWidget);
+
+      await _completeRegistration(tester);
+      expect(find.byType(FinanceHome), findsOneWidget);
+      expect(AppSettings.instance.current.hasCredentials, isTrue);
+    },
+  );
+
+  testWidgets('credenciales históricas admin/admin123 obligan a registrarse', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({
+      'onboarding_completed': true,
+      'settings_username': 'admin',
+      'settings_password': 'admin123',
+    });
+    await AppSettings.instance.load();
+    expect(AppSettings.instance.current.registrationCompleted, isFalse);
+
+    await _pumpApp(tester);
+    expect(find.byType(OnboardingScreen), findsNothing);
+    expect(find.byType(RegisterScreen), findsOneWidget);
+    expect(find.byType(LoginScreen), findsNothing);
+
+    await _completeRegistration(tester, user: 'mika', password: 'secreto1');
+    expect(find.byType(FinanceHome), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Cerrar sesión'));
+    await _settle(tester);
+    await _login(tester, user: 'mika', password: 'secreto1');
+    expect(find.byType(FinanceHome), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Cerrar sesión'));
+    await _settle(tester);
+    await _login(tester, user: 'admin', password: 'admin123');
+    expect(find.text('Usuario o contraseña incorrectos.'), findsOneWidget);
+  });
+
+  testWidgets(
     'el onboarding aparece solo la primera vez y persiste onboarding_completed',
     (tester) async {
-      await AppSettings.instance.resetOnboarding();
+      await _resetPreferences();
       final preferences = await SharedPreferences.getInstance();
-      expect(preferences.getBool('onboarding_completed'), isFalse);
+      expect(preferences.getBool('onboarding_completed'), isNull);
 
-      await _startFreshApp(tester);
-      await _login(tester, skipIntro: false);
-
+      await _pumpApp(tester);
       expect(find.byType(OnboardingScreen), findsOneWidget);
       expect(find.text('Bienvenido a tus finanzas'), findsOneWidget);
       expect(
@@ -639,24 +809,30 @@ void main() {
       await tester.tap(find.text('Comenzar'));
       await _settle(tester);
       expect(find.byType(OnboardingScreen), findsNothing);
+      expect(find.byType(RegisterScreen), findsOneWidget);
       expect(AppSettings.instance.current.onboardingCompleted, isTrue);
       expect(preferences.getBool('onboarding_completed'), isTrue);
 
-      // Al volver a ingresar, la introducción ya no se muestra.
+      await _completeRegistration(tester);
+      expect(find.byType(FinanceHome), findsOneWidget);
+
+      // Al volver a abrir la app, la introducción ya no se muestra y se
+      // solicitan las credenciales elegidas.
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
-      await _startFreshApp(tester);
-      await _login(tester, skipIntro: false);
+      await _pumpApp(tester);
       expect(find.byType(OnboardingScreen), findsNothing);
+      expect(find.byType(LoginScreen), findsOneWidget);
+      await _login(tester, user: 'nuevo', password: 'clave123');
+      expect(find.byType(FinanceHome), findsOneWidget);
     },
   );
 
   testWidgets('Anterior retrocede y Saltar guarda la finalización', (
     tester,
   ) async {
-    await AppSettings.instance.resetOnboarding();
-    await _startFreshApp(tester);
-    await _login(tester, skipIntro: false);
+    await _resetPreferences();
+    await _pumpApp(tester);
 
     await tester.tap(find.widgetWithText(FilledButton, 'Siguiente'));
     await tester.pumpAndSettle();
@@ -671,6 +847,7 @@ void main() {
     await tester.tap(find.text('Saltar'));
     await _settle(tester);
     expect(find.byType(OnboardingScreen), findsNothing);
+    expect(find.byType(RegisterScreen), findsOneWidget);
     final preferences = await SharedPreferences.getInstance();
     expect(preferences.getBool('onboarding_completed'), isTrue);
   });
@@ -678,7 +855,6 @@ void main() {
   testWidgets('Configuración permite volver a ver la introducción', (
     tester,
   ) async {
-    await AppSettings.instance.markOnboardingCompleted();
     await _startApp(tester);
 
     await tester.tap(find.byTooltip('Configuración'));
@@ -698,14 +874,43 @@ void main() {
     expect(find.text('Volver a ver la introducción'), findsOneWidget);
     expect(AppSettings.instance.current.onboardingCompleted, isTrue);
   });
-}
 
-/// Igual que [_startApp] pero sin iniciar sesión: lo hacen los tests que
-/// necesitan observar el onboarding posterior al login.
-Future<void> _startFreshApp(WidgetTester tester) async {
-  await tester.runAsync(() async {
-    await FinanceDatabase.instance.database;
+  testWidgets('el registro valida los datos antes de crear la cuenta', (
+    tester,
+  ) async {
+    await _resetPreferences();
+    await _pumpApp(tester);
+    await _completeOnboarding(tester);
+
+    expect(find.byType(RegisterScreen), findsOneWidget);
+    expect(find.text('Creá tu cuenta'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Crear cuenta'));
+    await _settle(tester);
+    expect(find.text('Ingresá un usuario'), findsOneWidget);
+
+    final fields = find.byType(TextFormField);
+    await tester.enterText(fields.at(0), 'nuevo');
+    await tester.enterText(fields.at(1), 'clave123');
+    await tester.enterText(fields.at(2), 'otra123');
+    await tester.tap(find.widgetWithText(FilledButton, 'Crear cuenta'));
+    await _settle(tester);
+    expect(find.text('Las contraseñas no coinciden'), findsOneWidget);
+
+    await tester.enterText(fields.at(2), 'clave123');
+    await tester.tap(find.widgetWithText(FilledButton, 'Crear cuenta'));
+    await _settle(tester);
+
+    expect(find.byType(RegisterScreen), findsNothing);
+    expect(find.byType(FinanceHome), findsOneWidget);
+    final preferences = await SharedPreferences.getInstance();
+    expect(preferences.getBool('registration_completed'), isTrue);
+    expect(preferences.getString('settings_username'), 'nuevo');
+
+    // Cierra sesión y vuelve a entrar con las credenciales recién creadas.
+    await tester.tap(find.byTooltip('Cerrar sesión'));
+    await _settle(tester);
+    await _login(tester, user: 'nuevo', password: 'clave123');
+    expect(find.byType(FinanceHome), findsOneWidget);
   });
-  await tester.pumpWidget(const FinanceApp());
-  await _settle(tester);
 }

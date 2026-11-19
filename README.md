@@ -7,15 +7,23 @@ se guardan localmente en el dispositivo.
 
 ## Funcionalidad
 
-- Inicio de sesión local con usuario `admin` y contraseña `admin123`
-  (modificables desde Configuración).
+- Inicio de sesión local **sin usuario ni contraseña por defecto**. En la
+  primera apertura se muestra la introducción y se obliga a crear el usuario y
+  la contraseña; recién después aparece el login. Las credenciales son
+  modificables desde Configuración. Si se olvidan, el login ofrece
+  **¿Olvidaste tus credenciales?**: borra solo usuario y contraseña, conserva
+  la base de datos y vuelve al registro sin repetir la introducción. Los
+  perfiles anteriores que solo tenían las credenciales de ejemplo `admin` /
+  `admin123` también deben registrarse.
 - Introducción animada de cuatro pasos (bienvenida, movimientos, presupuestos y
   metas de ahorro) que se muestra automáticamente después del primer ingreso.
   Se recorre con "Siguiente"/"Anterior" o se sale con "Saltar"; el estado se
   guarda en `SharedPreferences` bajo la clave `onboarding_completed` (con
-  migración de la clave anterior `settings_intro_completed`). Se puede volver a
-  ver desde Configuración → "Volver a ver la introducción". Las ilustraciones
-  usan animaciones nativas de Flutter, sin dependencias extra, y respetan la
+  migración de la clave anterior `settings_intro_completed`). Al terminar, el
+  usuario pasa por el registro antes de entrar al panel; se guarda con la clave
+  `registration_completed`. La introducción se puede volver a ver desde
+  Configuración → "Volver a ver la introducción". Las ilustraciones usan
+  animaciones nativas de Flutter, sin dependencias extra, y respetan la
   preferencia de reducción de movimiento del sistema.
 - Balance total y resumen del mes (ingresos y gastos), con animación de
   entrada, importes que se cuentan y barra animada de proporción ingresos/gastos.

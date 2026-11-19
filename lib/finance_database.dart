@@ -314,7 +314,8 @@ class FinanceDatabase {
       category TEXT NOT NULL,
       date TEXT NOT NULL,
       is_income INTEGER NOT NULL,
-      member_id INTEGER
+      member_id INTEGER,
+      is_shared INTEGER NOT NULL DEFAULT 0
     )
   ''');
 

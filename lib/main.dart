@@ -14,6 +14,7 @@ import 'package:finanzas_personales/category_visuals.dart';
 import 'package:finanzas_personales/finance_database.dart';
 import 'package:finanzas_personales/pdf_saver.dart';
 import 'package:finanzas_personales/onboarding/onboarding.dart';
+import 'package:finanzas_personales/register_screen.dart';
 import 'package:finanzas_personales/settings_screen.dart';
 
 /// SQLite por FFI depende de una biblioteca nativa que solo está disponible en
@@ -103,7 +104,26 @@ class _FinanceAppState extends State<FinanceApp> {
   void _doLogin() => setState(() => _loggedIn = true);
   void _doLogout() => setState(() => _loggedIn = false);
 
+  /// Sin credenciales guardadas no existe un login por defecto: se obliga a
+  /// pasar por el registro, incluso si la introducción ya se vio.
+  bool _needsRegistration(AppSettingsData settings) =>
+      !settings.registrationCompleted || !settings.hasCredentials;
+
   void _finishIntro() => AppSettings.instance.markOnboardingCompleted();
+
+  Future<void> _finishRegistration(String username, String password) async {
+    await AppSettings.instance.completeRegistration(
+      username: username,
+      password: password,
+    );
+    if (mounted) setState(() => _loggedIn = true);
+  }
+
+  /// Recuperación local: borra solo credenciales y vuelve al registro.
+  Future<void> _resetCredentials() async {
+    await AppSettings.instance.resetCredentials();
+    if (mounted) setState(() => _loggedIn = false);
+  }
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<AppSettingsData>(
@@ -133,11 +153,18 @@ class _FinanceAppState extends State<FinanceApp> {
           Locale('en'),
         ],
         locale: const Locale('es', 'AR'),
-        home: _loggedIn
-            ? (settings.onboardingCompleted
-                  ? FinanceHome(onLogout: _doLogout)
-                  : OnboardingScreen(onFinished: _finishIntro))
-            : LoginScreen(onLoggedIn: _doLogin),
+        home: _needsRegistration(settings)
+            ? (!settings.onboardingCompleted
+                  ? OnboardingScreen(onFinished: _finishIntro)
+                  : RegisterScreen(onRegistered: _finishRegistration))
+            : (_loggedIn
+                  ? (!settings.onboardingCompleted
+                        ? OnboardingScreen(onFinished: _finishIntro)
+                        : FinanceHome(onLogout: _doLogout))
+                  : LoginScreen(
+                      onLoggedIn: _doLogin,
+                      onForgotCredentials: _resetCredentials,
+                    )),
       );
     },
   );
@@ -148,8 +175,10 @@ class _FinanceAppState extends State<FinanceApp> {
 // ---------------------------------------------------------------------------
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({this.onLoggedIn, super.key});
+  const LoginScreen({this.onLoggedIn, this.onForgotCredentials, super.key});
+
   final VoidCallback? onLoggedIn;
+  final Future<void> Function()? onForgotCredentials;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -180,6 +209,31 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
     setState(() => _error = 'Usuario o contraseña incorrectos.');
+  }
+
+  Future<void> _confirmReset() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('¿Restablecer credenciales?'),
+        content: const Text(
+          'Se borrarán solo el usuario y la contraseña. Tus movimientos, '
+          'categorías e integrantes se conservan. Después deberás crear unos '
+          'nuevos.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Restablecer'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await widget.onForgotCredentials?.call();
   }
 
   @override
@@ -332,6 +386,13 @@ class _LoginScreenState extends State<LoginScreen> {
                             child: const Text('Iniciar sesión'),
                           ),
                         ),
+                        if (widget.onForgotCredentials != null) ...[
+                          const SizedBox(height: 6),
+                          TextButton(
+                            onPressed: _confirmReset,
+                            child: const Text('¿Olvidaste tus credenciales?'),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -427,11 +488,7 @@ class _FinanceHomeState extends State<FinanceHome> {
     ),
     1 => AnalysisScreen(refresh: _refresh),
     2 => ActivityScreen(refresh: _refresh, onEdit: _openEntryForm),
-    3 => FamilyScreen(
-      refresh: _refresh,
-      onLogout: widget.onLogout,
-      onOpenSettings: _openSettings,
-    ),
+    3 => FamilyScreen(refresh: _refresh),
     _ => CategoriesScreen(refresh: _refresh),
   };
 
@@ -1426,16 +1483,9 @@ class _BreakdownCard extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class FamilyScreen extends StatefulWidget {
-  const FamilyScreen({
-    required this.refresh,
-    required this.onLogout,
-    required this.onOpenSettings,
-    super.key,
-  });
+  const FamilyScreen({required this.refresh, super.key});
 
   final ValueNotifier<int> refresh;
-  final VoidCallback? onLogout;
-  final VoidCallback onOpenSettings;
 
   @override
   State<FamilyScreen> createState() => _FamilyScreenState();
@@ -1575,26 +1625,6 @@ class _FamilyScreenState extends State<FamilyScreen> {
                 ],
               ),
             ),
-          const SizedBox(height: 24),
-          Card(
-            child: Column(
-              children: [
-                ListTile(
-                  leading: const Icon(Icons.settings_outlined),
-                  title: const Text('Configuración'),
-                  subtitle: const Text('Tema, logo y credenciales'),
-                  trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: widget.onOpenSettings,
-                ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.logout, color: Color(0xFFCF6679)),
-                  title: const Text('Cerrar sesión'),
-                  onTap: widget.onLogout,
-                ),
-              ],
-            ),
-          ),
         ],
       ),
     );
